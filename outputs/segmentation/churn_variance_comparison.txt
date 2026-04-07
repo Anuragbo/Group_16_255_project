@@ -1,0 +1,8 @@
+Churn Rate Variance Across Clusters
+-----------------------------------
+K-Means (2 clusters): 0.005243
+GMM (4 clusters): 0.029307
+HDBSCAN with PCA (11 clusters): 0.055999
+HDBSCAN with Gower (10 clusters): 0.057155
+
+* Higher variance indicates the clustering algorithm successfully separated high-churn users from low-churn users.
