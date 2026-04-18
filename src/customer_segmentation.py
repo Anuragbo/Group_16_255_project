@@ -205,6 +205,10 @@ def run_clustering_pipeline():
         f.write(f"HDBSCAN with Gower ({num_hdb_gower} clusters): {var_hdb_gower:.6f}\n")
         f.write("\n* Higher variance indicates the clustering algorithm successfully separated high-churn users from low-churn users.")
         
+
+    print("\nSaving clustered dataset for Outlier Detection...")
+    df_results.to_parquet('data/clustered.parquet')
+    
     print("\nPipeline Complete! Results saved to outputs/segmentation/")
     
 if __name__ == "__main__":
