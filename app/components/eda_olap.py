@@ -323,6 +323,198 @@ def _view_service_contract(df: pd.DataFrame) -> None:
             st.plotly_chart(fig_sc, use_container_width=True)
 
 
+@st.cache_data
+def compute_olap_series(focus_col: str | None, focus_val: str | None) -> dict:
+    df = pd.read_parquet(RAW_DATA_PATH)
+    df["TotalCharges"] = pd.to_numeric(df["TotalCharges"], errors="coerce")
+    if focus_col and focus_val:
+        df = df[df[focus_col] == focus_val]
+
+    df["TenureCohort"] = pd.cut(
+        df["tenure"],
+        bins=[0, 12, 24, 48, 72],
+        labels=["0-12 mo", "13-24 mo", "25-48 mo", "49-72 mo"],
+        include_lowest=True,
+    )
+    df["ChargesCohort"] = pd.cut(
+        df["MonthlyCharges"],
+        bins=[0, 35, 65, 90, float("inf")],
+        labels=["$0-35", "$35-65", "$65-90", "$90+"],
+    )
+    df["PayType"] = df["PaymentMethod"].apply(
+        lambda value: "Auto-pay" if "automatic" in value.lower() else "Manual"
+    )
+
+    def churn_rate(group_col: str) -> pd.DataFrame:
+        return (
+            df.groupby(group_col, observed=True)["Churn"]
+            .apply(lambda x: (x == "Yes").mean() * 100)
+            .reset_index(name="ChurnRate")
+        )
+
+    cross_tab = (
+        df.groupby(["Contract", "InternetService"])["Churn"]
+        .apply(lambda x: (x == "Yes").mean() * 100)
+        .unstack("InternetService")
+        .round(1)
+    )
+
+    return {
+        "contract": churn_rate("Contract"),
+        "tenure": churn_rate("TenureCohort"),
+        "payment": churn_rate("PaymentMethod"),
+        "internet": churn_rate("InternetService"),
+        "charges": churn_rate("ChargesCohort"),
+        "pay_type": churn_rate("PayType"),
+        "cross_tab": cross_tab,
+        "n": len(df),
+    }
+
+
+def _view_olap() -> None:
+    st.caption("Showing all 7,043 customers. Sidebar filters do not apply here.")
+
+    focus_options = {"None (full dataset)": (None, None)}
+    for contract in ["Month-to-month", "One year", "Two year"]:
+        focus_options[f"Contract: {contract}"] = ("Contract", contract)
+    for internet in ["Fiber optic", "DSL", "No"]:
+        focus_options[f"Internet: {internet}"] = ("InternetService", internet)
+
+    focus_label = st.selectbox("Focus Dimension", list(focus_options.keys()))
+    focus_col, focus_val = focus_options[focus_label]
+    series = compute_olap_series(focus_col, focus_val)
+    st.caption(
+        f"Showing {series['n']:,} customers"
+        + (f" filtered to {focus_val}" if focus_val else " (full dataset)")
+    )
+
+    def make_bar(
+        data: pd.DataFrame,
+        x_col: str,
+        y_col: str = "ChurnRate",
+        orientation: str = "v",
+        annotation: str | None = None,
+        title: str = "",
+    ):
+        if orientation == "h":
+            fig = px.bar(
+                data,
+                x=y_col,
+                y=x_col,
+                orientation="h",
+                color=y_col,
+                color_continuous_scale="Reds",
+                title=title,
+            )
+        else:
+            fig = px.bar(
+                data,
+                x=x_col,
+                y=y_col,
+                color=y_col,
+                color_continuous_scale="Reds",
+                title=title,
+            )
+        fig.update_layout(height=280, coloraxis_showscale=False, margin=dict(t=50, b=0))
+        if annotation:
+            fig.add_annotation(
+                text=annotation,
+                xref="paper",
+                yref="paper",
+                x=0.5,
+                y=1.0,
+                showarrow=False,
+                font=dict(size=10, color="grey"),
+            )
+        return fig
+
+    r1c1, r1c2 = st.columns(2)
+    with r1c1:
+        st.plotly_chart(
+            make_bar(
+                series["contract"],
+                "Contract",
+                annotation="Full dataset: month-to-month is the highest-risk contract" if not focus_val else None,
+                title="Churn by Contract Type",
+            ),
+            use_container_width=True,
+        )
+    with r1c2:
+        st.plotly_chart(
+            make_bar(
+                series["tenure"],
+                "TenureCohort",
+                annotation="0-12 months is the highest-risk tenure cohort" if not focus_val else None,
+                title="Churn by Tenure Cohort",
+            ),
+            use_container_width=True,
+        )
+
+    r2c1, r2c2 = st.columns(2)
+    with r2c1:
+        st.plotly_chart(
+            make_bar(
+                series["payment"],
+                "PaymentMethod",
+                orientation="h",
+                annotation="Electronic check customers churn the most in the full dataset" if not focus_val else None,
+                title="Churn by Payment Method",
+            ),
+            use_container_width=True,
+        )
+    with r2c2:
+        st.plotly_chart(
+            make_bar(
+                series["internet"],
+                "InternetService",
+                annotation="Fiber optic customers show the highest churn" if not focus_val else None,
+                title="Churn by Internet Service",
+            ),
+            use_container_width=True,
+        )
+
+    r3c1, r3c2 = st.columns(2)
+    with r3c1:
+        st.plotly_chart(
+            make_bar(
+                series["charges"],
+                "ChargesCohort",
+                annotation="Mid-to-high monthly charge cohorts have the highest churn" if not focus_val else None,
+                title="Churn by Monthly Charges Cohort",
+            ),
+            use_container_width=True,
+        )
+    with r3c2:
+        st.plotly_chart(
+            make_bar(
+                series["pay_type"],
+                "PayType",
+                annotation="Manual payment customers churn more than auto-pay customers" if not focus_val else None,
+                title="Auto-pay vs Manual Payment",
+            ),
+            use_container_width=True,
+        )
+
+    st.subheader("Cross-Dimensional: Contract x Internet Service")
+    cross_tab = series["cross_tab"]
+    fig_ht = px.imshow(
+        cross_tab,
+        color_continuous_scale="Reds",
+        text_auto=".1f",
+        title="Churn Rate (%) by Contract x Internet Service",
+        labels=dict(x="Internet Service", y="Contract", color="Churn %"),
+    )
+    fig_ht.update_layout(height=300, margin=dict(t=50, b=20))
+    st.plotly_chart(fig_ht, use_container_width=True)
+    if not focus_val:
+        st.caption(
+            "The month-to-month and fiber optic cell is the highest-risk cohort in the full dataset."
+        )
+    else:
+        peak = cross_tab.max().max()
+        st.caption(f"Peak cell in the filtered view: **{peak:.1f}% churn**.")
+
+
 def render(filters: dict | None = None) -> None:
     filters = filters or {"contract_types": [], "internet_services": [], "senior": "All"}
     raw_full = load_raw()
@@ -335,7 +527,7 @@ def render(filters: dict | None = None) -> None:
 
     view = st.radio(
         "View",
-        ["Churn Overview", "Numeric Distributions", "Service & Contract"],
+        ["Churn Overview", "Numeric Distributions", "Service & Contract", "OLAP Drill-Down"],
         horizontal=True,
         label_visibility="collapsed",
     )
@@ -345,5 +537,7 @@ def render(filters: dict | None = None) -> None:
         _view_churn_overview(df)
     elif view == "Numeric Distributions":
         _view_numeric_distributions(df)
-    else:
+    elif view == "Service & Contract":
         _view_service_contract(df)
+    else:
+        _view_olap()
