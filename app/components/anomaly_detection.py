@@ -60,6 +60,16 @@ def load_clustered() -> pd.DataFrame:
     return pd.read_parquet(CLUSTERED_DATA_PATH)
 
 
+@st.cache_data
+def build_anomaly_churn_scatter(model_name: str) -> pd.DataFrame:
+    from app.components.predictive_modeling import score_dataset
+
+    scores_df = load_all_scores().reset_index().rename(columns={"index": "customer_index"})
+    pred_df, _ = score_dataset(model_name)
+    pred_df = pred_df.reset_index().rename(columns={"index": "customer_index"})
+    return scores_df.merge(pred_df, on="customer_index", how="left")
+
+
 def _apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
     if filters["contract_types"]:
         contract_map = {
@@ -247,6 +257,38 @@ def _section3_explorer(algo_info: dict, top_100_df: pd.DataFrame, global_means: 
     return selection
 
 
+def _section4_scatter(algo_info: dict, filtered_indices: pd.Series) -> None:
+    st.subheader("Anomaly Score vs Predicted Churn Probability")
+    score_col = algo_info["score_col"]
+
+    scatter_model = st.selectbox(
+        "Churn model for scatter",
+        ["XGBoost", "RandomForest", "LogisticRegression"],
+        key="anomaly_scatter_model",
+    )
+
+    merged = build_anomaly_churn_scatter(scatter_model)
+    merged = merged[merged["customer_index"].isin(filtered_indices)]
+
+    fig = px.scatter(
+        merged,
+        x=score_col,
+        y="p_churn",
+        color=merged["Churn"].map({0: "No Churn", 1: "Churned"}),
+        color_discrete_map={"No Churn": "#22C55E", "Churned": "#EF4444"},
+        opacity=0.45,
+        labels={score_col: "Anomaly Score", "p_churn": "Predicted Churn Probability"},
+        title=f"{score_col} vs churn probability using {scatter_model}",
+    )
+    fig.add_vline(x=merged[score_col].median(), line_dash="dot", line_color="grey")
+    fig.add_hline(y=merged["p_churn"].median(), line_dash="dot", line_color="grey")
+    fig.update_layout(height=500, margin=dict(t=50, b=0))
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "Customers in the top-right quadrant combine unusual behavior with high churn probability, making them strong intervention candidates."
+    )
+
+
 def render(filters: dict | None = None) -> None:
     filters = filters or {"contract_types": [], "internet_services": [], "senior": "All"}
     st.title("Anomaly Detection")
@@ -270,3 +312,5 @@ def render(filters: dict | None = None) -> None:
         st.session_state["prediction_filter"] = filtered_top100["customer_index"].tolist()
         st.session_state["prediction_filter_label"] = f"{selected_algo} visible anomaly cohort ({len(filtered_top100)} customers)"
         st.success("Predictive Modeling has been primed with the current anomaly cohort.")
+    st.divider()
+    _section4_scatter(algo_info, filtered_scores["customer_index"])

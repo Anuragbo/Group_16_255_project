@@ -33,5 +33,75 @@
     "metrics": {
       "cv_roc_auc": 0.8474071900549031
     }
+  },
+  "RandomForest": {
+    "path": "randomforest.pkl",
+    "default_threshold": 0.115,
+    "feature_order": [
+      "gender",
+      "SeniorCitizen",
+      "Partner",
+      "Dependents",
+      "tenure",
+      "PhoneService",
+      "MultipleLines",
+      "OnlineSecurity",
+      "OnlineBackup",
+      "DeviceProtection",
+      "TechSupport",
+      "StreamingTV",
+      "StreamingMovies",
+      "PaperlessBilling",
+      "MonthlyCharges",
+      "TotalCharges",
+      "InternetService_DSL",
+      "InternetService_Fiber_optic",
+      "InternetService_No",
+      "Contract_Month_to_month",
+      "Contract_One_year",
+      "Contract_Two_year",
+      "PaymentMethod_Bank_transfer_automatic",
+      "PaymentMethod_Credit_card_automatic",
+      "PaymentMethod_Electronic_check",
+      "PaymentMethod_Mailed_check"
+    ],
+    "metrics": {
+      "cv_roc_auc": 0.8299167371731793
+    }
+  },
+  "XGBoost": {
+    "path": "xgboost.pkl",
+    "default_threshold": 0.23,
+    "feature_order": [
+      "gender",
+      "SeniorCitizen",
+      "Partner",
+      "Dependents",
+      "tenure",
+      "PhoneService",
+      "MultipleLines",
+      "OnlineSecurity",
+      "OnlineBackup",
+      "DeviceProtection",
+      "TechSupport",
+      "StreamingTV",
+      "StreamingMovies",
+      "PaperlessBilling",
+      "MonthlyCharges",
+      "TotalCharges",
+      "InternetService_DSL",
+      "InternetService_Fiber_optic",
+      "InternetService_No",
+      "Contract_Month_to_month",
+      "Contract_One_year",
+      "Contract_Two_year",
+      "PaymentMethod_Bank_transfer_automatic",
+      "PaymentMethod_Credit_card_automatic",
+      "PaymentMethod_Electronic_check",
+      "PaymentMethod_Mailed_check"
+    ],
+    "metrics": {
+      "cv_roc_auc": 0.8331947152303265
+    }
   }
 }
