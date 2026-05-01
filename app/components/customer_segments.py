@@ -207,6 +207,14 @@ def _deep_dive(clustered_df: pd.DataFrame, cluster_col: str, profile: pd.DataFra
     elif algo_name == "K-Means":
         st.caption("K-Means mostly separates by tenure and spend, with weaker churn separation than HDBSCAN.")
 
+    st.divider()
+    cluster_mask = clustered_df[cluster_col] == selected_cluster_id
+    cluster_indices = clustered_df.index[cluster_mask].tolist()
+    if st.button(f"View Cluster {selected_cluster_id} customers in Predictive Modeling", key=f"drillthrough_{algo_name}"):
+        st.session_state["prediction_filter"] = cluster_indices
+        st.session_state["prediction_filter_label"] = f"{algo_name} - Cluster {selected_cluster_id} ({len(cluster_indices)} customers)"
+        st.success("Predictive Modeling has been primed with this cluster cohort.")
+
 
 def render(filters: dict | None = None) -> None:
     filters = filters or {"contract_types": [], "internet_services": [], "senior": "All"}

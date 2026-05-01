@@ -239,6 +239,11 @@ def _section3_explorer(algo_info: dict, top_100_df: pd.DataFrame, global_means: 
         st.caption(
             "Red bars show the strongest deviations from the global customer profile. Orange bars are secondary anomaly drivers."
         )
+        selected_customer = int(top_100_df.iloc[idx]["customer_index"]) if "customer_index" in top_100_df.columns else idx
+        if st.button("View this anomaly in Predictive Modeling", key=f"drill_anomaly_{selected_customer}"):
+            st.session_state["prediction_filter"] = [selected_customer]
+            st.session_state["prediction_filter_label"] = f"Selected anomaly customer #{selected_customer}"
+            st.success("Predictive Modeling has been primed with this customer.")
     return selection
 
 
@@ -261,3 +266,7 @@ def render(filters: dict | None = None) -> None:
     _section2_distributions(algo_info, filtered_scores, filtered_top100)
     st.divider()
     _section3_explorer(algo_info, filtered_top100, global_means)
+    if not filtered_top100.empty and st.button("View visible anomaly cohort in Predictive Modeling", key=f"drill_all_{selected_algo}"):
+        st.session_state["prediction_filter"] = filtered_top100["customer_index"].tolist()
+        st.session_state["prediction_filter_label"] = f"{selected_algo} visible anomaly cohort ({len(filtered_top100)} customers)"
+        st.success("Predictive Modeling has been primed with the current anomaly cohort.")
