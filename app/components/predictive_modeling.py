@@ -27,6 +27,28 @@ def load_models():
     return models, thresholds, manifest
 
 
+@st.cache_resource
+def load_shap_explainers():
+    import shap
+
+    models, _, manifest = load_models()
+    df = pd.read_parquet(CURATED_DATA_PATH)
+    explainers = {}
+    for name, model in models.items():
+        feature_order = manifest[name]["feature_order"]
+        X = df.drop(columns=["Churn"])[feature_order].astype(float)
+        if name == "LogisticRegression":
+            background = X.sample(n=min(200, len(X)), random_state=42)
+            explainers[name] = shap.LinearExplainer(
+                model,
+                background,
+                feature_perturbation="interventional",
+            )
+        else:
+            explainers[name] = shap.TreeExplainer(model)
+    return explainers
+
+
 @st.cache_data
 def score_dataset(model_name: str):
     models, _, manifest = load_models()
@@ -324,7 +346,6 @@ def _section4b_model_comparison() -> None:
 
 
 def _section5_prediction_table(selected_model: str, threshold: float, df_scored: pd.DataFrame, X_full: pd.DataFrame):
-    del selected_model, X_full
     st.subheader("Ranked Customer Predictions")
 
     df_display = df_scored.copy()
@@ -361,34 +382,260 @@ def _section5_prediction_table(selected_model: str, threshold: float, df_scored:
                 st.rerun()
         df_display = df_display[df_display["customer_index"].isin(st.session_state["prediction_filter"])]
 
-    selection = st.dataframe(
-        df_display[
-            [
-                "customer_index",
-                "prob_rank",
-                "p_churn_pct",
-                "distance_to_threshold_pct",
-                "Predicted",
-                "Actual",
-                "result_label",
-                "consensus_label",
-            ]
-        ].reset_index(drop=True),
-        on_select="rerun",
-        selection_mode="single-row",
-        use_container_width=True,
-        height=400,
-        column_config={
-            "customer_index": st.column_config.NumberColumn("Customer ID"),
-            "prob_rank": st.column_config.NumberColumn("Risk Rank"),
-            "p_churn_pct": st.column_config.NumberColumn("Churn Probability %", format="%.2f"),
-            "distance_to_threshold_pct": st.column_config.NumberColumn("Distance to Threshold %", format="%.2f"),
-            "result_label": st.column_config.TextColumn("Result"),
-            "Actual": st.column_config.TextColumn("Actual"),
-            "consensus_label": st.column_config.TextColumn("Model Consensus"),
-        },
+    col_table, col_export = st.columns([3, 1])
+    with col_table:
+        selection = st.dataframe(
+            df_display[
+                [
+                    "customer_index",
+                    "prob_rank",
+                    "p_churn_pct",
+                    "distance_to_threshold_pct",
+                    "Predicted",
+                    "Actual",
+                    "result_label",
+                    "consensus_label",
+                ]
+            ].reset_index(drop=True),
+            on_select="rerun",
+            selection_mode="single-row",
+            use_container_width=True,
+            height=400,
+            column_config={
+                "customer_index": st.column_config.NumberColumn("Customer ID"),
+                "prob_rank": st.column_config.NumberColumn("Risk Rank"),
+                "p_churn_pct": st.column_config.NumberColumn("Churn Probability %", format="%.2f"),
+                "distance_to_threshold_pct": st.column_config.NumberColumn("Distance to Threshold %", format="%.2f"),
+                "result_label": st.column_config.TextColumn("Result"),
+                "Actual": st.column_config.TextColumn("Actual"),
+                "consensus_label": st.column_config.TextColumn("Model Consensus"),
+            },
+        )
+    with col_export:
+        n_top = st.number_input("Export top-N by risk", min_value=10, max_value=int(len(df_display) or 10), value=min(100, max(10, int(len(df_display) or 10))))
+        st.download_button(
+            "Download Intervention List",
+            df_display.head(int(n_top)).to_csv(index=False),
+            "intervention_list.csv",
+        )
+    return selection, df_display, X_full
+
+
+def _section6_local_explainability(selected_model: str, threshold: float, selection, df_display: pd.DataFrame, X_full: pd.DataFrame) -> None:
+    if not selection.selection.rows:
+        return
+
+    selected_pos = selection.selection.rows[0]
+    selected_row = df_display.reset_index(drop=True).iloc[selected_pos]
+    selected_idx = int(selected_row["customer_index"])
+    p = float(selected_row["p_churn"])
+    actual = int(selected_row["Churn_actual"])
+    predicted = "Churn" if p >= threshold else "Stay"
+    correct = (predicted == "Churn" and actual == 1) or (predicted == "Stay" and actual == 0)
+
+    st.divider()
+    st.subheader(f"Customer #{selected_idx} Local Explainability")
+
+    explainers = load_shap_explainers()
+    row = X_full.loc[[selected_idx]]
+    shap_values = explainers[selected_model].shap_values(row)
+    expected_value = explainers[selected_model].expected_value
+    if isinstance(expected_value, (list, np.ndarray)):
+        expected_value = expected_value[1] if len(expected_value) > 1 else expected_value[0]
+    expected_value = float(np.asarray(expected_value))
+    if isinstance(shap_values, list):
+        shap_values = shap_values[1]
+    if hasattr(shap_values, "ndim") and shap_values.ndim == 3:
+        shap_values = shap_values[:, :, 1]
+    if hasattr(shap_values, "ndim") and shap_values.ndim == 2:
+        shap_values = shap_values[0]
+    shap_values = np.asarray(shap_values).ravel()
+
+    feature_names = row.columns.tolist()
+    feature_values = row.iloc[0].values
+    if shap_values.size != len(feature_names):
+        n = min(shap_values.size, len(feature_names))
+        shap_values = shap_values[:n]
+        feature_names = feature_names[:n]
+        feature_values = feature_values[:n]
+
+    contributions = (
+        pd.DataFrame(
+            {
+                "feature": feature_names,
+                "value": feature_values,
+                "contribution": shap_values,
+            }
+        )
+        .sort_values("contribution", key=abs, ascending=False)
+        .head(15)
     )
-    return selection
+    contributions["color"] = contributions["contribution"].apply(lambda value: "#EF4444" if value > 0 else "#22C55E")
+
+    fig = px.bar(
+        contributions,
+        x="contribution",
+        y="feature",
+        orientation="h",
+        color="color",
+        color_discrete_map="identity",
+        hover_data={"value": ":.3f", "color": False},
+        title="SHAP contributions (red increases churn risk, green decreases it)",
+    )
+    fig.update_layout(showlegend=False, yaxis={"categoryorder": "total ascending"}, height=420, margin=dict(t=50, b=0))
+    st.plotly_chart(fig, use_container_width=True)
+    final_logodds = expected_value + float(shap_values.sum())
+    st.caption(f"Base log-odds: {expected_value:.2f} -> final log-odds: {final_logodds:.2f} -> probability: {p:.1%}")
+    correctness_label = "Correct" if correct else "Incorrect"
+    st.caption(f"Predicted: {predicted} (p={p:.3f}, t={threshold:.3f}) | Actual: {actual} | {correctness_label}")
+
+
+def _section7_feature_impact_analysis(selected_model: str) -> None:
+    st.subheader("Feature Impact Analysis")
+    interp_dir = ROOT / "outputs" / "interpretability"
+    if selected_model == "LogisticRegression":
+        coef_df = pd.read_csv(interp_dir / "lr_coefficients.csv")
+        top20 = coef_df.sort_values("coefficient", key=abs, ascending=False).head(20).sort_values("coefficient")
+        top20["color"] = top20["coefficient"].apply(lambda value: "#EF4444" if value > 0 else "#22C55E")
+        top20["OR"] = top20["odds_ratio"].round(2)
+
+        fig = px.bar(
+            top20,
+            x="coefficient",
+            y="feature",
+            orientation="h",
+            color="color",
+            color_discrete_map="identity",
+            hover_data={"OR": True, "color": False},
+            title="Top 20 logistic regression coefficients",
+            labels={"OR": "Odds Ratio"},
+        )
+        fig.update_layout(showlegend=False, yaxis={"categoryorder": "total ascending"}, height=500, margin=dict(t=50, b=0))
+        st.plotly_chart(fig, use_container_width=True)
+    elif selected_model == "RandomForest":
+        st.image(str(interp_dir / "rf_shap_summary.png"), use_container_width=True)
+    elif selected_model == "XGBoost":
+        st.image(str(interp_dir / "xgb_shap_summary.png"), use_container_width=True)
+    else:
+        st.info("Global interpretability is available only for the serialized models in this dashboard.")
+
+
+def _section8_whatif(selected_model: str, threshold: float) -> None:
+    with st.expander("What-If Scoring", expanded=False):
+        st.caption("Adjust a hypothetical customer profile and score it with the selected model.")
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            tenure_wi = st.slider("Tenure (months)", 0, 72, 12, key="wi_tenure")
+            monthly_wi = st.slider("Monthly Charges ($)", 18.0, 120.0, 65.0, step=0.5, key="wi_monthly")
+            total_wi = st.number_input("Total Charges ($)", value=float(tenure_wi * monthly_wi), min_value=0.0, max_value=9000.0, key="wi_total")
+        with c2:
+            contract_wi = st.selectbox("Contract", ["Month-to-month", "One year", "Two year"], key="wi_contract")
+            internet_wi = st.selectbox("Internet Service", ["Fiber optic", "DSL", "No"], key="wi_internet")
+            payment_wi = st.selectbox(
+                "Payment Method",
+                ["Electronic check", "Mailed check", "Bank transfer (automatic)", "Credit card (automatic)"],
+                key="wi_payment",
+            )
+        with c3:
+            senior_wi = st.radio("Senior Citizen", ["No", "Yes"], horizontal=True, key="wi_senior")
+            paperless_wi = st.radio("Paperless Billing", ["Yes", "No"], horizontal=True, key="wi_paperless")
+            partner_wi = st.radio("Partner", ["Yes", "No"], horizontal=True, key="wi_partner")
+
+        if st.button("Predict churn probability", key="wi_predict"):
+            models, _, manifest = load_models()
+            feature_order = manifest[selected_model]["feature_order"]
+            raw_row = {
+                "tenure": tenure_wi,
+                "MonthlyCharges": monthly_wi,
+                "TotalCharges": total_wi,
+                "SeniorCitizen": 1 if senior_wi == "Yes" else 0,
+                "Partner": 1 if partner_wi == "Yes" else 0,
+                "PaperlessBilling": 1 if paperless_wi == "Yes" else 0,
+                "Contract_Month_to_month": 1 if contract_wi == "Month-to-month" else 0,
+                "Contract_One_year": 1 if contract_wi == "One year" else 0,
+                "Contract_Two_year": 1 if contract_wi == "Two year" else 0,
+                "InternetService_Fiber_optic": 1 if internet_wi == "Fiber optic" else 0,
+                "InternetService_DSL": 1 if internet_wi == "DSL" else 0,
+                "InternetService_No": 1 if internet_wi == "No" else 0,
+                "PaymentMethod_Electronic_check": 1 if payment_wi == "Electronic check" else 0,
+                "PaymentMethod_Mailed_check": 1 if payment_wi == "Mailed check" else 0,
+                "PaymentMethod_Bank_transfer_automatic": 1 if payment_wi == "Bank transfer (automatic)" else 0,
+                "PaymentMethod_Credit_card_automatic": 1 if payment_wi == "Credit card (automatic)" else 0,
+            }
+            row_df = pd.DataFrame([{feature: raw_row.get(feature, 0) for feature in feature_order}])[feature_order].astype(float)
+            p_wi = models[selected_model].predict_proba(row_df)[0, 1]
+            color = "#EF4444" if p_wi >= threshold else "#22C55E"
+            label = "Churn" if p_wi >= threshold else "Stay"
+            st.markdown(f"<h3 style='color:{color};'>Predicted: {label} ({p_wi:.1%})</h3>", unsafe_allow_html=True)
+            st.caption(f"Using {selected_model} at threshold {threshold:.3f}.")
+
+
+def _section9_retention_simulator(selected_model: str, threshold: float) -> None:
+    with st.expander("Retention Impact Simulator", expanded=False):
+        st.caption("Re-score the dataset after applying a simple retention policy scenario.")
+
+        sim_policy = st.selectbox(
+            "Retention policy scenario",
+            [
+                "Month-to-month -> One year contract",
+                "Manual payment -> Auto-pay",
+                "No online security -> Add online security",
+            ],
+            key="sim_policy",
+        )
+        sim_scope = st.radio(
+            "Apply to",
+            ["All customers matching the condition", "Top-N highest-risk only"],
+            horizontal=True,
+            key="sim_scope",
+        )
+        sim_n = None
+        if sim_scope == "Top-N highest-risk only":
+            sim_n = st.slider("N", 50, 1000, 200, step=50, key="sim_n")
+
+        if st.button("Run simulation", key="run_sim"):
+            models, _, manifest = load_models()
+            df_sim = pd.read_parquet(CURATED_DATA_PATH)
+            feature_order = manifest[selected_model]["feature_order"]
+            X_sim = df_sim.drop(columns=["Churn"])[feature_order].astype(float)
+
+            p_base = models[selected_model].predict_proba(X_sim)[:, 1]
+            X_scenario = X_sim.copy()
+
+            if sim_policy == "Month-to-month -> One year contract":
+                mask = X_scenario["Contract_Month_to_month"] == 1
+                X_scenario.loc[mask, "Contract_Month_to_month"] = 0
+                X_scenario.loc[mask, "Contract_One_year"] = 1
+            elif sim_policy == "Manual payment -> Auto-pay":
+                manual_cols = ["PaymentMethod_Electronic_check", "PaymentMethod_Mailed_check"]
+                mask = X_scenario[manual_cols].sum(axis=1) > 0
+                X_scenario.loc[mask, manual_cols] = 0
+                if "PaymentMethod_Bank_transfer_automatic" in X_scenario.columns:
+                    X_scenario.loc[mask, "PaymentMethod_Bank_transfer_automatic"] = 1
+            elif sim_policy == "No online security -> Add online security" and "OnlineSecurity" in X_scenario.columns:
+                mask = X_scenario["OnlineSecurity"] == 0
+                X_scenario.loc[mask, "OnlineSecurity"] = 1
+
+            if sim_scope == "Top-N highest-risk only" and sim_n:
+                top_n_idx = pd.Series(p_base, index=X_scenario.index).nlargest(sim_n).index
+                p_modified = p_base.copy()
+                p_scenario_sub = models[selected_model].predict_proba(X_scenario.loc[top_n_idx])[:, 1]
+                for position, idx in enumerate(top_n_idx):
+                    p_modified[idx] = p_scenario_sub[position]
+            else:
+                p_modified = models[selected_model].predict_proba(X_scenario)[:, 1]
+
+            base_rate = (p_base >= threshold).mean()
+            scenario_rate = (p_modified >= threshold).mean()
+            delta_pp = (scenario_rate - base_rate) * 100
+            affected = int((p_base != p_modified).sum())
+
+            col_b, col_s, col_d = st.columns(3)
+            col_b.metric("Current predicted churn rate", f"{base_rate:.1%}")
+            col_s.metric("Scenario predicted churn rate", f"{scenario_rate:.1%}", delta=f"{delta_pp:+.1f}pp", delta_color="inverse")
+            col_d.metric("Customers affected", affected)
+            st.caption(f"Scenario: **{sim_policy}** re-scored with {selected_model} at threshold {threshold:.3f}.")
 
 
 def render() -> None:
@@ -418,4 +665,10 @@ def render() -> None:
     st.divider()
     _section4b_model_comparison()
     st.divider()
-    _section5_prediction_table(selected_model, threshold, df_scored, X_full)
+    selection, df_display, X_full = _section5_prediction_table(selected_model, threshold, df_scored, X_full)
+    _section6_local_explainability(selected_model, threshold, selection, df_display, X_full)
+    st.divider()
+    _section7_feature_impact_analysis(selected_model)
+    st.divider()
+    _section8_whatif(selected_model, threshold)
+    _section9_retention_simulator(selected_model, threshold)
